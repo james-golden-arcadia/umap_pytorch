@@ -43,7 +43,7 @@ class Model(pl.LightningModule):
         if not self.match_nonparametric_umap:
             (edges_to_exp, edges_from_exp) = batch
             embedding_to, embedding_from = self.encoder(edges_to_exp), self.encoder(edges_from_exp)
-            encoder_loss = umap_loss(embedding_to, embedding_from, self._a, self._b, edges_to_exp.shape[0], negative_sample_rate=5)
+            encoder_loss = umap_loss(embedding_to, embedding_from, self._a, self._b, edges_to_exp.shape[0], negative_sample_rate=5, device=self.device)
             self.log("umap_loss", encoder_loss, prog_bar=True)
             
             if self.decoder:
@@ -109,6 +109,8 @@ class PUMAP():
         num_workers=1,
         num_gpus=1,
         match_nonparametric_umap=False,
+        nonparametric_embeddings=None,
+        save_ckpts=False
     ):
         self.encoder = encoder
         self.decoder = decoder
@@ -125,9 +127,62 @@ class PUMAP():
         self.num_workers = num_workers
         self.num_gpus = num_gpus
         self.match_nonparametric_umap = match_nonparametric_umap
+        self.nonparametric_embeddings = nonparametric_embeddings
+        self.save_ckpts = save_ckpts
         
     def fit(self, X):
-        trainer = pl.Trainer(accelerator='gpu', devices=1, max_epochs=self.epochs)
+        if self.save_ckpts:
+            import os
+            from pytorch_lightning.callbacks import ModelCheckpoint
+
+            from pytorch_lightning.callbacks import Callback
+            class EveryNEpochsCheckpoint(Callback):
+                """
+                Save checkpoints every N epochs without blocking training.
+                
+                Args:
+                    save_dir: Directory to save checkpoints
+                    every_n_epochs: Save checkpoint every N epochs (default: 5)
+                    filename: Filename pattern (can use {epoch} placeholder)
+                """
+                
+                def __init__(
+                    self,
+                    save_dir: str = "checkpoints",
+                    every_n_epochs: int = 5,
+                    filename: str = "checkpoint_epoch_{epoch:03d}.ckpt"
+                ):
+                    self.save_dir = save_dir
+                    self.every_n_epochs = every_n_epochs
+                    self.filename = filename
+                    os.makedirs(save_dir, exist_ok=True)
+                
+                def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+                    """Save checkpoint at the end of every N epochs"""
+                    epoch = trainer.current_epoch
+                    
+                    # Check if this epoch should trigger a save
+                    if (epoch + 1) % self.every_n_epochs == 0:
+                        filepath = os.path.join(
+                            self.save_dir,
+                            self.filename.format(epoch=epoch)
+                        )
+                        # Use trainer's save_checkpoint which is async and non-blocking
+                        trainer.save_checkpoint(filepath)
+                        print(f"Saved checkpoint: {filepath}")
+
+            # Create the callback
+            checkpoint_callback = EveryNEpochsCheckpoint(
+                save_dir="my_checkpoints",
+                every_n_epochs=5,
+                filename="model_epoch_{epoch:03d}.ckpt",
+                # monitor='val_loss',          # The metric to monitor
+            )
+
+            trainer = pl.Trainer(accelerator=self.device, devices=1, max_epochs=self.epochs, callbacks=[checkpoint_callback])#, default_root_dir='/colab/glass-box-umap/ckpts_1007')#
+            
+        else:
+            trainer = pl.Trainer(accelerator=self.device, devices=1, max_epochs=self.epochs)
         encoder = default_encoder(X.shape[1:], self.n_components) if self.encoder is None else self.encoder
         
         if self.decoder is None or isinstance(self.decoder, nn.Module):
@@ -143,20 +198,22 @@ class PUMAP():
                 model=self.model,
                 datamodule=Datamodule(UMAPDataset(X, graph), self.batch_size, self.num_workers)
                 )
+            if self.save_ckpts:
+                print(checkpoint_callback.best_model_path)
         else:
-            print("Fitting Non parametric Umap")
-            non_parametric_umap = UMAP(n_neighbors=self.n_neighbors, min_dist=self.min_dist, metric=self.metric, n_components=self.n_components, random_state=self.random_state, verbose=True)
-            non_parametric_embeddings = non_parametric_umap.fit_transform(torch.flatten(X, 1, -1).numpy())
+            if self.nonparametric_embeddings is None:
+                print("Fitting Non parametric Umap")
+                non_parametric_umap = UMAP(n_neighbors=self.n_neighbors, min_dist=self.min_dist, metric=self.metric, n_components=self.n_components, random_state=self.random_state, verbose=True)
+                self.non_parametric_embeddings = non_parametric_umap.fit_transform(torch.flatten(X, 1, -1).numpy())
             self.model = Model(self.lr, encoder, decoder, beta=self.beta, reconstruction_loss=self.reconstruction_loss, match_nonparametric_umap=self.match_nonparametric_umap)
             print("Training NN to match embeddings")
             trainer.fit(
                 model=self.model,
-                datamodule=Datamodule(MatchDataset(X, non_parametric_embeddings), self.batch_size, self.num_workers)
+                datamodule=Datamodule(MatchDataset(X, self.nonparametric_embeddings), self.batch_size, self.num_workers)
             )
         
     @torch.no_grad()
     def transform(self, X):
-        print(f"Reducing array of shape {X.shape} to ({X.shape[0]}, {self.n_components})")
         return self.model.encoder(X).detach().cpu().numpy()
     
     @torch.no_grad()

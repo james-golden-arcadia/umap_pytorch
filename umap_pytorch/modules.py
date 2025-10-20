@@ -8,7 +8,7 @@ def convert_distance_to_probability(distances, a=1.0, b=1.0):
     return -torch.log1p(a * distances ** (2 * b))
 
 def compute_cross_entropy(
-    probabilities_graph, probabilities_distance, EPS=1e-4, repulsion_strength=1.0
+    probabilities_graph, probabilities_distance, EPS=1e-4, repulsion_strength=3.0
 ):
     # cross entropy
     attraction_term = -probabilities_graph * torch.nn.functional.logsigmoid(
@@ -23,7 +23,7 @@ def compute_cross_entropy(
     CE = attraction_term + repellant_term
     return attraction_term, repellant_term, CE
 
-def umap_loss(embedding_to, embedding_from, _a, _b, batch_size, negative_sample_rate=5):
+def umap_loss(embedding_to, embedding_from, _a, _b, batch_size, negative_sample_rate=5, device='cuda'):
     # get negative samples by randomly shuffling the batch
     embedding_neg_to = embedding_to.repeat(negative_sample_rate, 1)
     repeat_neg = embedding_from.repeat(negative_sample_rate, 1)
@@ -44,8 +44,8 @@ def umap_loss(embedding_to, embedding_from, _a, _b, batch_size, negative_sample_
 
     # compute cross entropy
     (attraction_loss, repellant_loss, ce_loss) = compute_cross_entropy(
-        probabilities_graph.cuda(),
-        probabilities_distance.cuda(),
+        probabilities_graph.to(device),
+        probabilities_distance.to(device),
     )
     loss = torch.mean(ce_loss)
     return loss
@@ -60,7 +60,7 @@ def get_umap_graph(X, n_neighbors=10, metric="cosine", random_state=None):
 
     # get nearest neighbors
     nnd = NNDescent(
-        X.reshape((len(X), np.product(np.shape(X)[1:]))),
+        X,#.reshape((len(X), np.product(np.shape(X)[1:]))),
         n_neighbors=n_neighbors,
         metric=metric,
         n_trees=n_trees,
