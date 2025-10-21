@@ -128,7 +128,8 @@ class PUMAP():
         self.num_gpus = num_gpus
         self.match_nonparametric_umap = match_nonparametric_umap
         self.nonparametric_embeddings = nonparametric_embeddings
-        self.save_ckpts = save_ckpts
+        self.save_ckpts = save_ckpts        
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
     def fit(self, X):
         if self.save_ckpts:
@@ -230,4 +231,5 @@ def load_pumap(path):
     with open(path, 'rb') as inp: return dill.load(inp)
 
 if __name__== "__main__":
+
     pass
